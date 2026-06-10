@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { 
   Bot, 
   Terminal, 
@@ -31,10 +31,15 @@ import {
   DollarSign,
   Cpu,
   Square,
-  ExternalLink
+  ExternalLink,
+  Sun,
+  Moon,
+  ChevronDown
 } from "lucide-react";
-import { BOT_SOURCE_CODE } from "./data/botSourceCode";
+import { BOT_TEMPLATES } from "./data/botTemplates";
 import AdminDashboard from "./components/AdminDashboard";
+// @ts-ignore
+import botAvatar from "./assets/images/bot_premium_avatar_1781048729862.png";
 
 const DICT = {
   ar: {
@@ -147,10 +152,16 @@ const DICT = {
 
 export default function App() {
   const [lang, setLang] = useState<"ar" | "en">("ar");
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("all-in-one");
   const [activeTab, setActiveTab ] = useState<"overview" | "code" | "sandbox" | "ai" | "growth">("overview");
   const [loggerTab, setLoggerTab] = useState<"local" | "live">("local");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [copiedFileIndex, setCopiedFileIndex] = useState<number | null>(null);
+
+  const activeTemplate = BOT_TEMPLATES.find(t => t.id === selectedTemplateId) || BOT_TEMPLATES[0];
+  const currentFiles = activeTemplate.files;
+  const activeFile = currentFiles[selectedFileIndex] || currentFiles[0] || { name: "", path: "", language: "python" as const, content: "", description: "" };
 
   // Live Live configuration states (Interactive config.py parameters)
   const [botToken, setBotToken] = useState(() => {
@@ -160,22 +171,45 @@ export default function App() {
     return localStorage.getItem("ADMIN_IDS") || "2138200729";
   });
   const [geminiApiKey, setGeminiApiKey] = useState(() => {
-    return localStorage.getItem("GEMINI_API_KEY") || "AIzaSyBBaud1dWUrpys9kxocTwiZ8P038kw1x8g";
+    return localStorage.getItem("GEMINI_API_KEY") || "AIzaSyCSvCPg_YKqUKD70amQ0sKAX_-70kIru0E";
   });
+
+  const [saveStatus, setSaveStatus] = useState<"clean" | "saving" | "saved">("clean");
+  const saveTimeoutRef = useRef<any>(null);
+  const saveTimeoutRefSecond = useRef<any>(null);
+
+  const triggerSaveIndicator = () => {
+    setSaveStatus("saving");
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+    if (saveTimeoutRefSecond.current) {
+      clearTimeout(saveTimeoutRefSecond.current);
+    }
+    saveTimeoutRef.current = setTimeout(() => {
+      setSaveStatus("saved");
+      saveTimeoutRefSecond.current = setTimeout(() => {
+        setSaveStatus("clean");
+      }, 2000);
+    }, 450);
+  };
 
   const updateBotToken = (val: string) => {
     setBotToken(val);
     localStorage.setItem("BOT_TOKEN", val || "8994906142:AAHrIArGfx01PMCDhk2-jL64X8j2gfrGMRM");
+    triggerSaveIndicator();
   };
 
   const updateAdminIds = (val: string) => {
     setAdminIds(val);
     localStorage.setItem("ADMIN_IDS", val || "2138200729");
+    triggerSaveIndicator();
   };
 
   const updateGeminiApiKey = (val: string) => {
     setGeminiApiKey(val);
     localStorage.setItem("GEMINI_API_KEY", val);
+    triggerSaveIndicator();
   };
 
   const getProcessedCode = (content: string) => {
@@ -205,6 +239,17 @@ export default function App() {
   const fetchLiveBotStatus = async () => {
     try {
       const res = await fetch("/api/bot/status");
+      if (!res.ok) {
+        // If not OK, silent return to prevent log clutter during boot or restart.
+        return;
+      }
+      
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        // Safe check for HTML loading/error wrapper returned by proxy during warmup.
+        return;
+      }
+
       const data = await res.json();
       setLiveBotActive(data.active && data.status?.isRunning);
       if (data.status) {
@@ -214,7 +259,8 @@ export default function App() {
         setLiveBotLogs(data.logs);
       }
     } catch (e) {
-      console.error("Error fetching live bot status:", e);
+      // Avoid verbose console.error warnings for syntax exceptions during system warmup
+      console.log("Status update skipped (server warming up):", e);
     }
   };
 
@@ -236,6 +282,12 @@ export default function App() {
           geminiApiKey,
         }),
       });
+      
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error(lang === "ar" ? "الرابط لم يعثر على استجابة JSON صالحة. هل الخادم قيد التشغيل؟" : "Invalid response type from backend server. Is server warm?");
+      }
+
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || "Failed to start");
@@ -259,6 +311,12 @@ export default function App() {
       const res = await fetch("/api/bot/stop", {
         method: "POST",
       });
+
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error("Invalid format returned from backend.");
+      }
+
       const data = await res.json();
       setLiveBotActive(false);
       setLiveBotStatus({ isRunning: false, botName: "", userCount: 0, offset: 0 });
@@ -272,8 +330,24 @@ export default function App() {
   };
   
   // AI Generator local States
-  const [aiNiche, setAiNiche] = useState("AI Automation & Copywriting SaaS");
-  const [aiType, setAiType] = useState<"guide" | "script">("guide");
+  const [aiNiche, setAiNiche] = useState(() => {
+    return localStorage.getItem("AI_NICHE") || "AI Automation & Copywriting SaaS";
+  });
+  const [aiType, setAiType] = useState<"guide" | "script">((() => {
+    const stored = localStorage.getItem("AI_TYPE");
+    return (stored === "guide" || stored === "script") ? stored : "guide";
+  }));
+
+  const updateAiNiche = (val: string) => {
+    setAiNiche(val);
+    localStorage.setItem("AI_NICHE", val);
+  };
+
+  const updateAiType = (val: "guide" | "script") => {
+    setAiType(val);
+    localStorage.setItem("AI_TYPE", val);
+  };
+
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [aiResult, setAiResult] = useState<string>("");
   const [aiError, setAiError] = useState<string | null>(null);
@@ -330,6 +404,11 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: promptText, systemInstruction }),
       });
+
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error(lang === "ar" ? "الخادم لم يستجب بصيغة JSON صالحة. هل المفاتيح صحيحة؟" : "Invalid response type from backend server. Are the keys valid?");
+      }
 
       const data = await response.json();
       if (!response.ok) {
@@ -440,8 +519,12 @@ export default function App() {
     );
   };
 
+  const isDark = theme === "dark";
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col antialiased">
+    <div className={`min-h-screen font-sans flex flex-col antialiased transition-colors duration-300 ${
+      isDark ? "bg-slate-950 text-slate-100" : "bg-slate-50 text-slate-900"
+    }`}>
       {/* Dynamic Pop Banner */}
       {alertMessage && (
         <div className="fixed top-5 right-5 z-50 bg-indigo-900 border border-indigo-700 text-white px-5 py-3 rounded-xl shadow-2xl flex items-center gap-2 animate-bounce">
@@ -467,6 +550,29 @@ export default function App() {
 
         {/* Global Controls & Stats top right */}
         <div className="flex flex-wrap items-center gap-3">
+          {/* Elegant Theme Toggle */}
+          <button
+            onClick={() => {
+              const nextTheme = theme === "dark" ? "light" : "dark";
+              setTheme(nextTheme);
+              triggerAlert(lang === "ar" ? `تم تفعيل الوضع ${nextTheme === "dark" ? "المظلم 🌙" : "المضيء ☀️"}` : `Switched to ${nextTheme === "dark" ? "Dark 🌙" : "Light ☀️"} mode`);
+            }}
+            className="bg-slate-950 hover:bg-slate-900 px-3 py-2 rounded-xl border border-indigo-950/80 text-indigo-400 hover:text-white transition-all cursor-pointer flex items-center gap-1.5 font-sans font-bold text-[11px]"
+            title={lang === "ar" ? "تبديل المظهر" : "Toggle Theme"}
+          >
+            {theme === "dark" ? (
+              <>
+                <Sun className="w-3.5 h-3.5 text-amber-400" />
+                <span>{lang === "ar" ? "المضيء ☀️" : "Light ☀️"}</span>
+              </>
+            ) : (
+              <>
+                <Moon className="w-3.5 h-3.5 text-indigo-300" />
+                <span>{lang === "ar" ? "المظلم 🌙" : "Dark 🌙"}</span>
+              </>
+            )}
+          </button>
+
           {/* Elegant Bilingual Switcher */}
           <div className="bg-slate-950 p-1.5 rounded-xl border border-indigo-950/80 flex items-center gap-1 font-sans">
             <button
@@ -513,30 +619,45 @@ export default function App() {
         
         {/* Navigation Sidebar Drawer */}
         <aside className="lg:w-72 shrink-0 flex flex-col gap-4">
-          <div className="bg-gradient-to-br from-indigo-900 to-slate-900 rounded-2xl p-5 text-white shadow-xl relative overflow-hidden">
-            <div className="absolute right-[-40px] bottom-[-40px] opacity-10">
-              <Bot className="w-48 h-48" />
+          <div className="bg-gradient-to-br from-indigo-950 via-slate-900 to-indigo-900 rounded-2xl p-5 text-white shadow-xl relative overflow-hidden border border-indigo-800/10">
+            <div className="flex items-center gap-3 mb-3 relative z-10">
+              <img 
+                src={botAvatar} 
+                alt="Al-Ghiath Bot Logo" 
+                className="w-12 h-12 rounded-xl object-cover border-2 border-amber-500 shadow-md transform hover:rotate-6 transition-transform" 
+                referrerPolicy="no-referrer"
+              />
+              <div>
+                <span className="text-[9px] font-bold text-amber-400 font-mono tracking-wider block">OFFICIAL BRAND</span>
+                <h4 className="text-sm font-extrabold text-slate-100 font-sans tracking-tight">محمد الغياث</h4>
+              </div>
             </div>
-            <h2 className="text-lg font-bold font-sans">{DICT[lang].sidebarTitle}</h2>
-            <p className="text-xs text-indigo-200 mt-1 leading-relaxed">
+            <h2 className="text-lg font-bold font-sans relative z-10">{DICT[lang].sidebarTitle}</h2>
+            <p className="text-xs text-indigo-200 mt-1 leading-relaxed relative z-10">
               {DICT[lang].sidebarDesc}
             </p>
-            <div className="bg-slate-950/40 p-3 rounded-xl border border-indigo-800/40 mt-4 text-xs font-mono text-indigo-300">
+            <div className="bg-slate-950/40 p-3 rounded-xl border border-indigo-800/40 mt-4 text-xs font-mono text-indigo-300 relative z-10">
               {DICT[lang].statusBadge}
             </div>
           </div>
 
-          <nav className="bg-white rounded-2xl border border-slate-100 p-3 shadow-xs space-y-1">
+          <nav className={`rounded-2xl border p-3 shadow-xs space-y-1 transition-all duration-300 ${
+            isDark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+          }`}>
             <button 
               onClick={() => setActiveTab("overview")}
               className={`w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition-all ${
                 activeTab === "overview" 
-                  ? "bg-indigo-50 border border-indigo-100 text-indigo-950" 
-                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+                  ? isDark
+                    ? "bg-indigo-950/80 border border-indigo-900/50 text-indigo-300"
+                    : "bg-indigo-50 border border-indigo-100 text-indigo-950" 
+                  : isDark
+                    ? "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
+                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
               }`}
             >
               <div className="flex items-center gap-2.5">
-                <TrendingUp className="w-4 h-4 text-indigo-600" />
+                <TrendingUp className="w-4 h-4 text-indigo-500" />
                 <span className="font-sans">{DICT[lang].navOverview}</span>
               </div>
               <ChevronRight className="w-4 h-4 text-slate-400" />
@@ -546,12 +667,16 @@ export default function App() {
               onClick={() => setActiveTab("code")}
               className={`w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition-all ${
                 activeTab === "code" 
-                  ? "bg-indigo-50 border border-indigo-100 text-indigo-950" 
-                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+                  ? isDark
+                    ? "bg-indigo-950/80 border border-indigo-900/50 text-indigo-300"
+                    : "bg-indigo-50 border border-indigo-100 text-indigo-950" 
+                  : isDark
+                    ? "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
+                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
               }`}
             >
               <div className="flex items-center gap-2.5">
-                <Code className="w-4 h-4 text-indigo-600" />
+                <Code className="w-4 h-4 text-indigo-500" />
                 <span className="font-sans">{DICT[lang].navCode}</span>
               </div>
               <ChevronRight className="w-4 h-4 text-slate-400" />
@@ -561,12 +686,16 @@ export default function App() {
               onClick={() => setActiveTab("sandbox")}
               className={`w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition-all ${
                 activeTab === "sandbox" 
-                  ? "bg-indigo-50 border border-indigo-100 text-indigo-950" 
-                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+                  ? isDark
+                    ? "bg-indigo-950/80 border border-indigo-900/50 text-indigo-300"
+                    : "bg-indigo-50 border border-indigo-100 text-indigo-950" 
+                  : isDark
+                    ? "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
+                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
               }`}
             >
               <div className="flex items-center gap-2.5">
-                <Smartphone className="w-4 h-4 text-indigo-600" />
+                <Smartphone className="w-4 h-4 text-indigo-500" />
                 <span className="font-sans">{DICT[lang].navSandbox}</span>
               </div>
               <ChevronRight className="w-4 h-4 text-slate-400" />
@@ -576,27 +705,35 @@ export default function App() {
               onClick={() => setActiveTab("ai")}
               className={`w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition-all ${
                 activeTab === "ai" 
-                  ? "bg-indigo-50 border border-indigo-100 text-indigo-950" 
-                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+                  ? isDark
+                    ? "bg-indigo-950/80 border border-indigo-900/50 text-indigo-300"
+                    : "bg-indigo-50 border border-indigo-100 text-indigo-950" 
+                  : isDark
+                    ? "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
+                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
               }`}
             >
               <div className="flex items-center gap-2.5">
-                <Sparkles className="w-4 h-4 text-indigo-600" />
+                <Sparkles className="w-4 h-4 text-indigo-500" />
                 <span className="font-sans">{DICT[lang].navAi}</span>
               </div>
-              <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded-sm uppercase">{DICT[lang].activeStatus}</span>
+              <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-bold px-1.5 py-0.5 rounded-md uppercase">{DICT[lang].activeStatus}</span>
             </button>
 
             <button 
               onClick={() => setActiveTab("growth")}
               className={`w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition-all ${
                 activeTab === "growth" 
-                  ? "bg-indigo-50 border border-indigo-100 text-indigo-950" 
-                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+                  ? isDark
+                    ? "bg-indigo-950/80 border border-indigo-900/50 text-indigo-300"
+                    : "bg-indigo-50 border border-indigo-100 text-indigo-950" 
+                  : isDark
+                    ? "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
+                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
               }`}
             >
               <div className="flex items-center gap-2.5">
-                <BookOpen className="w-4 h-4 text-indigo-600" />
+                <BookOpen className="w-4 h-4 text-indigo-500" />
                 <span className="font-sans">{DICT[lang].navGuide}</span>
               </div>
               <ChevronRight className="w-4 h-4 text-slate-400" />
@@ -604,14 +741,16 @@ export default function App() {
           </nav>
 
           {/* Quick Technical stats bottom of navigation menu */}
-          <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-xs text-xs space-y-3">
-            <h4 className="font-bold text-slate-800 uppercase font-mono tracking-wider">{DICT[lang].sysConfig}</h4>
-            <div className="flex justify-between items-center text-slate-500 font-mono">
-              <span>{DICT[lang].pyVersion}</span>
-              <span className="text-slate-800 font-bold">3.11</span>
+          <div className={`rounded-2xl border p-4 shadow-xs text-xs space-y-3 transition-all duration-300 ${
+            isDark ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-100 text-slate-900"
+          }`}>
+            <h4 className={`font-bold uppercase font-mono tracking-wider ${isDark ? "text-slate-350" : "text-slate-800"}`}>{DICT[lang].sysConfig}</h4>
+            <div className="flex justify-between items-center text-slate-405 font-mono">
+              <span className="text-slate-400">{DICT[lang].pyVersion}</span>
+              <span className={`font-bold ${isDark ? "text-slate-200" : "text-slate-800"}`}>3.11</span>
             </div>
-            <div className="flex justify-between items-center text-slate-500 font-mono">
-              <span>{DICT[lang].runtimeEng}</span>
+            <div className="flex justify-between items-center text-slate-405 font-mono">
+              <span className="text-slate-400 font-sans">{DICT[lang].runtimeEng}</span>
               <span className="text-slate-800 font-bold">Aiogram + asyncio</span>
             </div>
             <div className="flex justify-between items-center text-slate-500 font-mono border-t border-slate-50 pt-2.5">
@@ -705,7 +844,7 @@ export default function App() {
               </div>
 
               {/* Import our pre-assembled AdminDashboard component */}
-              <AdminDashboard lang={lang} />
+              <AdminDashboard lang={lang} theme={theme} />
             </div>
           )}
 
@@ -713,32 +852,138 @@ export default function App() {
           {activeTab === "code" && (
             <div className="space-y-6">
               
-              {/* Live Interactive Token Configurator Panel */}
-              <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-3xs space-y-4">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-55">
+              {/* Bot Template Selector Dropdown */}
+              <div className={`${theme === "dark" ? "bg-slate-900 border-slate-800 text-white" : "bg-white border-slate-100 text-slate-900"} p-6 rounded-2xl border shadow-3xs space-y-4 transition-all duration-300`}>
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                   <div className="flex items-center gap-2.5">
-                    <span className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
-                      <Zap className="w-5 h-5 text-indigo-600 animate-pulse" />
+                    <span className={`p-2 rounded-xl ${theme === "dark" ? "bg-indigo-950 text-indigo-400" : "bg-indigo-50 text-indigo-600"}`}>
+                      <Code className="w-5 h-5 text-indigo-500" />
                     </span>
                     <div>
-                      <h3 className="text-sm font-bold text-slate-900 font-sans">
+                      <h3 className={`text-sm font-bold font-sans ${theme === "dark" ? "text-slate-100" : "text-slate-900"}`}>
+                        {lang === "ar" ? "🤖 اختر نموذج أو قالب البوت الجاهز" : "🤖 Select Production Bot Template"}
+                      </h3>
+                      <p className={`text-xs mt-0.5 ${theme === "dark" ? "text-slate-400" : "text-slate-500"}`}>
+                        {lang === "ar" 
+                          ? "قم بالتبديل بين الهياكل والملفات البرمجية الجاهزة للتصدير الفوري لملائمة نموذج عملك المفضل." 
+                          : "Switch between clean pre-built formats to adjust your target automation logic."}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Dropdown UI styling */}
+                  <div className="relative min-w-[260px] self-start md:self-center">
+                    <select
+                      value={selectedTemplateId}
+                      onChange={(e) => {
+                        setSelectedTemplateId(e.target.value);
+                        setSelectedFileIndex(0);
+                        triggerAlert(lang === "ar" 
+                          ? `🟢 تم تحميل قالب: ${BOT_TEMPLATES.find(t => t.id === e.target.value)?.nameAr}` 
+                          : `🟢 Loaded: ${BOT_TEMPLATES.find(t => t.id === e.target.value)?.name} template`
+                        );
+                      }}
+                      className={`w-full appearance-none px-4 py-2.5 rounded-xl text-xs font-sans font-bold border outline-none pr-10 transition-all ${
+                        theme === "dark"
+                          ? "bg-slate-950 border-slate-800 text-slate-200 focus:bg-slate-900 focus:border-indigo-500"
+                          : "bg-slate-50 border-slate-200 text-slate-850 focus:bg-white focus:border-indigo-500"
+                      }`}
+                    >
+                      {BOT_TEMPLATES.map((t) => (
+                        <option key={t.id} value={t.id} className={theme === "dark" ? "bg-slate-950 text-slate-200" : "bg-white text-slate-800"}>
+                          {lang === "ar" ? t.nameAr : t.name}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-slate-400">
+                      <ChevronDown className="w-4 h-4" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Info summary message box for selected option */}
+                <div className={`p-4 rounded-xl border flex items-start gap-3 transition-colors duration-300 ${
+                  theme === "dark" ? "bg-slate-950/65 border-slate-800 text-slate-300" : "bg-indigo-50/50 border-indigo-100/50 text-slate-700"
+                }`}>
+                  <span className={`p-1.5 rounded-lg shrink-0 mt-0.5 ${theme === "dark" ? "bg-indigo-950 text-indigo-400" : "bg-indigo-50 text-indigo-600"}`}>
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-455" />
+                  </span>
+                  <div className="space-y-1">
+                    <p className={`text-xs font-extrabold ${theme === "dark" ? "text-indigo-300" : "text-indigo-950"}`}>
+                      {lang === "ar" ? "تفاصيل وخصائص البنية البرمجية المحملة:" : "Loaded Capabilities Overview:"}
+                    </p>
+                    <p className={`text-[11px] leading-relaxed ${theme === "dark" ? "text-slate-400" : "text-slate-600"}`}>
+                      {lang === "ar" ? activeTemplate.descriptionAr : activeTemplate.description}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Live Interactive Token Configurator Panel */}
+              <div className={`${isDark ? "bg-slate-900 border-slate-800 text-white" : "bg-white border-slate-100 text-slate-900"} p-6 rounded-2xl border shadow-3xs space-y-4 transition-all duration-300`}>
+                <div className={`flex flex-col md:flex-row md:items-center justify-between gap-3 pb-4 border-b ${isDark ? "border-slate-800/80" : "border-slate-100"}`}>
+                  <div className="flex items-center gap-2.5">
+                    <span className={`p-2 rounded-xl transition-colors ${isDark ? "bg-indigo-950/80 text-indigo-400" : "bg-indigo-50 text-indigo-600"}`}>
+                      <Zap className="w-5 h-5 animate-pulse text-indigo-500" />
+                    </span>
+                    <div>
+                      <h3 className={`text-sm font-bold font-sans ${isDark ? "text-slate-100" : "text-slate-900"}`}>
                         {lang === "ar" ? "💻 تهيئة الرموز الحية للمعالجة الفورية والتصدير" : "💻 Live Environment Token Configurator"}
                       </h3>
-                      <p className="text-xs text-slate-400 mt-0.5">
+                      <p className={`text-xs mt-0.5 ${isDark ? "text-slate-400" : "text-slate-500"}`}>
                         {lang === "ar" 
                           ? "قم بتعديل قيم المتغيرات وسيتم حقنها وتحديث الأكواد المعروضة بالأسفل مباشرة في الحافظة." 
                           : "Modify keys below; all files and copy blocks adjust instantly in memory."}
                       </p>
                     </div>
                   </div>
-                  <span className="text-[10px] font-mono font-bold bg-indigo-50 border border-indigo-100 text-indigo-600 px-2 py-1 rounded-md self-start md:self-center">
-                    {lang === "ar" ? "حقن ديناميكي نَشِط" : "Dynamic Injection: Active"}
-                  </span>
+                  
+                  {/* Dynamic Persist auto-saving Indicator */}
+                  <div className="flex flex-wrap items-center gap-2 self-start md:self-center">
+                    {saveStatus === "saving" && (
+                      <span className={`inline-flex items-center gap-1.5 text-[10px] font-sans font-extrabold px-2.5 py-1 rounded-md border animate-pulse transition-colors ${
+                        isDark 
+                          ? "bg-amber-950/60 border-amber-900/50 text-amber-300"
+                          : "bg-amber-50 border-amber-100 text-amber-700"
+                      }`}>
+                        <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping" />
+                        {lang === "ar" ? "جاري الحفظ تلقائياً..." : "Auto-saving..."}
+                      </span>
+                    )}
+                    {saveStatus === "saved" && (
+                      <span className={`inline-flex items-center gap-1.5 text-[10px] font-sans font-extrabold px-2.5 py-1 rounded-md border transition-colors ${
+                        isDark 
+                          ? "bg-emerald-950/60 border-emerald-900/50 text-emerald-300"
+                          : "bg-emerald-50 border-emerald-100 text-emerald-700"
+                      }`}>
+                        <Check className="w-3.5 h-3.5 text-emerald-500 stroke-[3]" />
+                        {lang === "ar" ? "تم الحفظ تلقائياً! ✅" : "Auto-Saved & Synced!"}
+                      </span>
+                    )}
+                    {saveStatus === "clean" && (
+                      <span className={`inline-flex items-center gap-1.5 text-[10px] font-sans font-bold px-2.5 py-1 rounded-md border opacity-80 transition-colors ${
+                        isDark
+                          ? "bg-slate-950/70 border-slate-800 text-slate-400"
+                          : "bg-slate-50 border-slate-150 text-slate-500"
+                      }`}>
+                        <Check className="w-3.5 h-3.5 text-slate-400" />
+                        {lang === "ar" ? "محفوظ في المتصفح" : "Stored in local storage"}
+                      </span>
+                    )}
+
+                    <span className={`text-[10px] font-mono font-bold px-2.5 py-1 rounded-md border transition-colors ${
+                      isDark 
+                        ? "bg-indigo-950/60 border-indigo-900/50 text-indigo-350" 
+                        : "bg-indigo-50 border-indigo-100 text-indigo-600"
+                    }`}>
+                      {lang === "ar" ? "حقن ديناميكي نَشِط" : "Dynamic Injection: Active"}
+                    </span>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pb-1">
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 uppercase font-mono tracking-wider mb-1.5">
+                    <label className={`block text-[11px] font-bold uppercase font-mono tracking-wider mb-1.5 ${isDark ? "text-slate-350" : "text-slate-700"}`}>
                       {lang === "ar" ? "توكن البوت (BOT_TOKEN)" : "Telegram BOT_TOKEN"}
                     </label>
                     <input
@@ -746,11 +991,15 @@ export default function App() {
                       value={botToken}
                       onChange={(e) => updateBotToken(e.target.value)}
                       placeholder="e.g. 8994906142:AAHr..."
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none rounded-xl text-xs font-mono text-slate-800 font-medium transition-all shadow-3xs"
+                      className={`w-full px-3 py-2 rounded-xl text-xs font-mono font-medium transition-all border ${
+                        isDark 
+                          ? "bg-slate-950 border-slate-800 focus:bg-slate-900 text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" 
+                          : "bg-slate-50 border-slate-200 focus:bg-white text-slate-800 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      } shadow-3xs`}
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 uppercase font-mono tracking-wider mb-1.5">
+                    <label className={`block text-[11px] font-bold uppercase font-mono tracking-wider mb-1.5 ${isDark ? "text-slate-350" : "text-slate-700"}`}>
                       {lang === "ar" ? "معرّفات المسؤولين (ADMIN_IDS)" : "Telegram ADMIN_IDS"}
                     </label>
                     <input
@@ -758,11 +1007,15 @@ export default function App() {
                       value={adminIds}
                       onChange={(e) => updateAdminIds(e.target.value)}
                       placeholder="e.g. 2138200729"
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none rounded-xl text-xs font-mono text-slate-800 font-medium transition-all shadow-3xs"
+                      className={`w-full px-3 py-2 rounded-xl text-xs font-mono font-medium transition-all border ${
+                        isDark 
+                          ? "bg-slate-950 border-slate-800 focus:bg-slate-900 text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" 
+                          : "bg-slate-50 border-slate-200 focus:bg-white text-slate-800 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      } shadow-3xs`}
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 uppercase font-mono tracking-wider mb-1.5">
+                    <label className={`block text-[11px] font-bold uppercase font-mono tracking-wider mb-1.5 ${isDark ? "text-slate-350" : "text-slate-700"}`}>
                       {lang === "ar" ? "مفتاح Gemini API (اختياري)" : "Google GEMINI_API_KEY (Optional)"}
                     </label>
                     <input
@@ -770,7 +1023,11 @@ export default function App() {
                       value={geminiApiKey}
                       onChange={(e) => updateGeminiApiKey(e.target.value)}
                       placeholder={lang === "ar" ? "مفتاح ذكاء اصطناعي لـ Gemini" : "API key details"}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none rounded-xl text-xs font-mono text-slate-800 font-medium transition-all shadow-3xs"
+                      className={`w-full px-3 py-2 rounded-xl text-xs font-mono font-medium transition-all border ${
+                        isDark 
+                          ? "bg-slate-950 border-slate-800 focus:bg-slate-900 text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" 
+                          : "bg-slate-50 border-slate-200 focus:bg-white text-slate-800 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      } shadow-3xs`}
                     />
                   </div>
                 </div>
@@ -788,7 +1045,7 @@ export default function App() {
                     </p>
                   </div>
                   
-                  {BOT_SOURCE_CODE.map((f, index) => (
+                  {currentFiles.map((f, index) => (
                     <button
                       key={f.path}
                       onClick={() => setSelectedFileIndex(index)}
@@ -822,12 +1079,12 @@ export default function App() {
                   <div className="bg-slate-950 px-5 py-3.5 flex items-center justify-between border-b border-slate-800 shrink-0">
                     <div className="flex items-center gap-2">
                       <Terminal className="w-4.5 h-4.5 text-indigo-400" />
-                      <span className="text-xs font-mono font-bold text-indigo-100">{BOT_SOURCE_CODE[selectedFileIndex].path}</span>
-                      <span className="text-[10px] text-slate-500 font-mono">({BOT_SOURCE_CODE[selectedFileIndex].language})</span>
+                      <span className="text-xs font-mono font-bold text-indigo-100">{activeFile.path}</span>
+                      <span className="text-[10px] text-slate-500 font-mono">({activeFile.language})</span>
                     </div>
 
                     <button
-                      onClick={() => handleCopyCode(getProcessedCode(BOT_SOURCE_CODE[selectedFileIndex].content), selectedFileIndex)}
+                      onClick={() => handleCopyCode(getProcessedCode(activeFile.content), selectedFileIndex)}
                       className="flex items-center gap-1.5 text-xs text-indigo-300 hover:text-white font-medium bg-slate-900 hover:bg-slate-850 px-3 py-1.5 rounded-lg border border-slate-800 transition-all cursor-pointer"
                     >
                       {copiedFileIndex === selectedFileIndex ? (
@@ -845,7 +1102,7 @@ export default function App() {
                   </div>
 
                   <div className="p-5 overflow-y-auto flex-1 font-mono text-xs text-slate-300 leading-relaxed max-h-[600px] bg-slate-950">
-                    <pre className="whitespace-pre-wrap">{getProcessedCode(BOT_SOURCE_CODE[selectedFileIndex].content)}</pre>
+                    <pre className="whitespace-pre-wrap">{getProcessedCode(activeFile.content)}</pre>
                   </div>
                   
                   <div className="bg-slate-950 border-t border-slate-850 px-5 py-3 shrink-0 flex items-center justify-between text-[11px] text-slate-500 font-mono">
@@ -1076,15 +1333,18 @@ export default function App() {
                 {/* Bot Profile bar Header */}
                 <div className="bg-slate-950 px-5 py-3 flex items-center justify-between border-b border-indigo-950/40 shrink-0">
                   <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 bg-indigo-650 text-white flex items-center justify-center rounded-full font-black animate-pulse text-xs">
-                      AI⭐
-                    </div>
+                    <img 
+                      src={botAvatar} 
+                      alt="Mohamed Al-Ghiath Bot Avatar" 
+                      className="w-10 h-10 rounded-full border border-amber-500 object-cover" 
+                      referrerPolicy="no-referrer"
+                    />
                     <div>
                       <h4 className="text-sm font-bold text-white font-sans flex items-center gap-1.5">
-                        ALGHealth AI Bot Engine
+                        {lang === "ar" ? "بوت محمد الغياث الذكي 🤖" : "Mohamed Al-Ghiath AI Bot 🤖"}
                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
                       </h4>
-                      <p className="text-[10px] text-indigo-400 font-medium tracking-wide font-mono">bot @ALGHealth_IncomeBot</p>
+                      <p className="text-[10px] text-indigo-400 font-medium tracking-wide font-mono">@alghiath_money_bot</p>
                     </div>
                   </div>
                 </div>
@@ -1203,7 +1463,7 @@ export default function App() {
                     <input
                       type="text"
                       value={aiNiche}
-                      onChange={(e) => setAiNiche(e.target.value)}
+                      onChange={(e) => updateAiNiche(e.target.value)}
                       placeholder={lang === "ar" ? "مثال: بوت تداول الذهب، خدمات التمويل المستقلة للشركات..." : "e.g. trading bots, automated shorts generator, etc."}
                       className="w-full text-xs px-4 py-3 bg-slate-50 border border-slate-150 rounded-xl focus:bg-white focus:ring-2 focus:ring-indigo-100 outline-none transition-all font-semibold"
                     />
@@ -1213,7 +1473,7 @@ export default function App() {
                     <label className="block text-xs font-semibold text-slate-600 mb-2">{DICT[lang].campaignStyleLabel}</label>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <button
-                        onClick={() => setAiType("guide")}
+                        onClick={() => updateAiType("guide")}
                         className={`p-3 rounded-xl text-xs font-bold border transition-all cursor-pointer text-left block leading-tight ${
                           aiType === "guide" 
                             ? "bg-indigo-600 text-white border-indigo-600 shadow-sm"
@@ -1223,7 +1483,7 @@ export default function App() {
                         {DICT[lang].marketingPlanOpt}
                       </button>
                       <button
-                        onClick={() => setAiType("script")}
+                        onClick={() => updateAiType("script")}
                         className={`p-3 rounded-xl text-xs font-bold border transition-all cursor-pointer text-left block leading-tight ${
                           aiType === "script" 
                             ? "bg-indigo-600 text-white border-indigo-600 shadow-sm"

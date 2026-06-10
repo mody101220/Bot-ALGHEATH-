@@ -67,6 +67,20 @@ export class LiveTelegramBotServer {
     this.addLog("info", "جاري بدء تشغيل البوت الحي وفحص رمز الوصول (Bot Token)...");
 
     try {
+      // Delete any active conflicting webhooks (e.g., set by LivegramBot) and drop backlog updates
+      this.addLog("info", "جاري تنظيف وحذف أي اتصالات Webhook نشطة أو متعارضة مسبقاً (مثل LivegramBot)...");
+      try {
+        const delRes = await fetch(`https://api.telegram.org/bot${this.token}/deleteWebhook?drop_pending_updates=true`);
+        const delData = await delRes.json();
+        if (delData.ok) {
+          this.addLog("success", "🔄 تم حذف اتصالات الـ Webhook المعلقة بنجاح وتنظيف قائمة الانتظار.");
+        } else {
+          this.addLog("info", `تنبيه تنظيف الـ Webhook: ${delData.description || "لم يتم بنجاح كامل ولكن سنواصل"}`);
+        }
+      } catch (webhookErr: any) {
+        this.addLog("info", `تنبيه أثناء محاولة حذف الـ Webhook: ${webhookErr.message}`);
+      }
+
       // Fetch bot info to verify token and retrieve actual bot username
       const res = await fetch(`https://api.telegram.org/bot${this.token}/getMe`);
       if (!res.ok) {
@@ -127,6 +141,64 @@ export class LiveTelegramBotServer {
     }
   }
 
+  private async checkSponsorSubscription(userId: number): Promise<boolean> {
+    const channel = "@MoneydroidArabic";
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${this.token}/getChatMember?chat_id=${channel}&user_id=${userId}`);
+      const data = await res.json();
+      if (data.ok && data.result) {
+        const status = data.result.status;
+        return ["member", "administrator", "creator"].includes(status);
+      } else {
+        // If the Telegram server responds with an error indicating that the bot is not in the channel or channel doesn't exist,
+        // we log an informative log, notify or bypass smoothly to avoid locking local testing
+        this.addLog("info", `تنبيه التحقق من الاشتراك: لم نتمكن من الوصول للقناة ${channel} (ربما البوت ليس مضافاً كمسؤول هناك).`);
+        return true; 
+      }
+    } catch (e: any) {
+      this.addLog("info", `خطأ أثناء التحقق من اشتراك القناة: ${e.message}`);
+      return true; // Graceful bypass
+    }
+  }
+
+  private async sendSponsorRequiredMessage(chatId: number) {
+    const channel = "@MoneydroidArabic";
+    const text = `📢 **خطوة إجبارية لتفعيل حسابك ومحاولاتك المجانية!**\n\n` +
+      `لكي نستطيع الاستمرار في تقديم كافة خدمات التوليد والدراسات المالية بالذكاء الاصطناعي (Gemini 3.5) مجاناً وبأعلى سرعة ممكنة، يرجى الاشتراك في قناة الراعي الرسمي للبوت أولاً.\n\n` +
+      `**قناة الراعي:** ${channel}\n\n` +
+      `بعد انضمامك للقناة، اضغط على زر تفعيل الحساب بالأسفل للتحقق الفوري والبدء فوراً! 👇`;
+
+    const replyMarkup = {
+      inline_keyboard: [
+        [{ text: "📢 انضم لقناة الراعي الآن", url: `https://t.me/${channel.substring(1)}` }],
+        [{ text: "✅ تحقق من الاشتراك وتفعيل الحساب", callback_data: "act_verify_sponsor" }]
+      ]
+    };
+
+    await this.sendMessage(chatId, text, replyMarkup);
+  }
+
+  private getReplyKeyboardMarkup() {
+    return {
+      keyboard: [
+        [{ text: "🚀 ابدأ كسب الأرباح ⚡" }, { text: "📸 مختبر السيناريوهات الفيروسية" }],
+        [
+          { text: "👥 رابط الإحالة والعمولات 🔗" },
+          { text: "💎 ترقية الحساب (VIP) 👑" }
+        ],
+        [
+          { text: "🎰 عجلة الحظ اليومية 🎡" },
+          { text: "📊 إحصائيات حسابي 📈" }
+        ],
+        [
+          { text: "❓ دليل الاستخدام 📚" }
+        ]
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false
+    };
+  }
+
   private async handleUpdate(update: any) {
     try {
       if (update.message) {
@@ -156,14 +228,42 @@ export class LiveTelegramBotServer {
           }
         }
 
-        // Standard commands
+        // Standard commands & reply keyboard inputs
         if (text.startsWith("/start")) {
+          // Check sponsor subscription first
+          const isSubscribed = await this.checkSponsorSubscription(userId);
+          if (!isSubscribed) {
+            await this.sendSponsorRequiredMessage(userId);
+            return;
+          }
           await this.sendWelcomeMessage(userId, fullName, user);
-        } else if (text == "/help") {
+        } else if (text === "/help" || text === "❓ دليل الاستخدام 📚") {
           await this.sendHelpMessage(userId);
+        } else if (text === "🚀 ابدأ كسب الأرباح ⚡") {
+          const isSubscribed = await this.checkSponsorSubscription(userId);
+          if (!isSubscribed) {
+            await this.sendSponsorRequiredMessage(userId);
+            return;
+          }
+          await this.triggerAffiliateFlow(userId, user);
+        } else if (text === "📸 مختبر السيناريوهات الفيروسية") {
+          const isSubscribed = await this.checkSponsorSubscription(userId);
+          if (!isSubscribed) {
+            await this.sendSponsorRequiredMessage(userId);
+            return;
+          }
+          await this.triggerViralFlow(userId, user);
+        } else if (text === "👥 رابط الإحالة والعمولات 🔗") {
+          await this.triggerRefLinkFlow(userId, user);
+        } else if (text === "💎 ترقية الحساب (VIP) 👑") {
+          await this.triggerPremiumFlow(userId, user);
+        } else if (text === "📊 إحصائيات حسابي 📈") {
+          await this.triggerStatsFlow(userId, user);
+        } else if (text === "🎰 عجلة الحظ اليومية 🎡") {
+          await this.triggerLuckySpinFlow(userId, user);
         } else {
           // Send general unknown guidance message with main navigation menu
-          await this.sendWelcomeMessage(userId, fullName, user, "يرجى الضغط على أحد أزرار اللوحة التفاعلية بالأسفل أو استخدام الأمر /start للبدء:");
+          await this.sendWelcomeMessage(userId, fullName, user, "يرجى الضغط على أحد أزرار اللوحة التفاعلية بالأسفل أو استخدام الأزرار الذكية المضافة فجأة بجانب الكيبورد للبدء والمضي قدماً:");
         }
 
       } else if (update.callback_query) {
@@ -189,6 +289,149 @@ export class LiveTelegramBotServer {
     } catch (error: any) {
       console.error("Error processing update:", error);
       this.addLog("error", `خطأ معالجة وتحديث: ${error.message}`);
+    }
+  }
+
+  private async triggerAffiliateFlow(userId: number, user: SimUser) {
+    if (!user.isPremium && user.freeUsesLeft <= 0) {
+      await this.sendMessage(
+        userId,
+        "⚠️ **انتهت المحاولات المجانية اليومية!**\n\n" +
+        "لقد استنزفت محاولاتك الـ 5 المجانية لتوليد الخطط الذكية اليوم. " +
+        "للحصول على معالجة سريعة وبلا حدود أو قيود، يرجى الترقية للعضوية المميزة مدى الحياة.",
+        { inline_keyboard: [[{ text: "👑 ترقية لبريميوم", callback_data: "btn_live_premium" }]] }
+      );
+      return;
+    }
+
+    this.userStates[userId] = { state: "waiting_for_niche", timestamp: Date.now() };
+    await this.sendMessage(
+      userId,
+      "💡 **خطوة مطلوبة لإنتاج خطة تسويقية تدر دخلاً:**\n\n" +
+      "اكتب المجال المالي أو المنتج الترويجي الذي تريد تحقيق ربح منه وسيقوم محرك Gemini بكتابة خطة متكاملة لك باللغة العربية.\n\n" +
+      "(مثال: *خدمات سحابية، تداول عملات، كتب وروايات مخصصة، قوالب وخدمات برمجية*):",
+      { inline_keyboard: [[{ text: "🔙 إلغاء والعودة للرئيسية", callback_data: "btn_live_back" }]] }
+    );
+  }
+
+  private async triggerViralFlow(userId: number, user: SimUser) {
+    if (!user.isPremium && user.freeUsesLeft <= 0) {
+      await this.sendMessage(
+        userId,
+        "⚠️ **انتهت المحاولات المجانية اليومية!**\n\n" +
+        "لقد استنزفت محاولاتك الـ 5 المجانية لتوليد الخطط الذكية اليوم. " +
+        "للحصول على معالجة سريعة وبلا حدود أو قيود، يرجى الترقية للعضوية المميزة مدى الحياة.",
+        { inline_keyboard: [[{ text: "👑 ترقية لبريميوم", callback_data: "btn_live_premium" }]] }
+      );
+      return;
+    }
+
+    this.userStates[userId] = { state: "waiting_for_script", timestamp: Date.now() };
+    await this.sendMessage(
+      userId,
+      "🎥 **مختبر صناعة الفيديوهات الفيروسية (TikTok / Reels / Shorts)**\n\n" +
+      "أدخل عنوان المقطع أو المنتج الذكي الذي تريد صناعة سيناريو مشوق يشد المتابعين إليه بالكامل:\n\n" +
+      "(مثال: *قوة التداول المؤتمت، كيف أربح 150 دولاراً يومياً عبر الإنترنت*):",
+      { inline_keyboard: [[{ text: "🔙 إلغاء والعودة للرئيسية", callback_data: "btn_live_back" }]] }
+    );
+  }
+
+  private async triggerRefLinkFlow(userId: number, user: SimUser) {
+    const invite_link = `https://t.me/${this.botName}?start=ref_${userId}`;
+    const referral_list = Object.values(this.users).filter(u => u.referredBy === userId).length;
+    const rewardMultiplier = user.isPremium ? 50 : 25;
+
+    const ref_message = 
+      "👥 **لوحة تحكم شبكة التسويق بالعمولة والشركاء**\n\n" +
+      "احصل على دخل متكرر حقيقي من خلال ترويج البوت ومشاركة رابطك. " +
+      "أي مستخدم يشترك أو يرقي حسابه من خلالك، سيمنحك فوراً عمولة بالنجوم مباشرة في رصيدك!\n\n" +
+      `📌 **رابط الإحالة الخاص بك للتسويق المباشر:**\n` +
+      `\`${invite_link}\`\n\n` +
+      `📊 **تحليلات العمولات والشبكة الحالية:**\n` +
+      `├ عدد الإحالات المسجلين بالكامل من خلالك: **${referral_list} مستخدم**\n` +
+      `├ عمولتك من ترقيات المشاركين: **${rewardMultiplier}%**\n` +
+      `├ مكافأة التسجيل الفوري للمرجع الجديد: **+50 ⭐ نجمة**\n` +
+      `└ رصيد الأرباح المتراكم القابل للسحب الفوري: **${user.starsBalance} نجمة ⭐**\n\n` +
+      "👉 *شارك رابطك المخصص على تيك توك، يوتيوب، أو مجموعات واتساب وتيليجرام للحصول على أرباح هائلة يومية! مقطع إعلاني واحد ناجح قد يجلب لك مئات المشتركين.*";
+    
+    await this.sendMessage(userId, ref_message, {
+      inline_keyboard: [[{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]]
+    });
+  }
+
+  private async triggerPremiumFlow(userId: number, user: SimUser) {
+    const premium_text = 
+      "💎 **مزايا العضوية الفائقة المميزة مدى الحياة:**\n\n" +
+      "🟢 **توليد لانهائي بالذكاء الاصطناعي**: قم بإنشاء خطط تسويق وسيناريوهات إعلانية بلا حدود لمعرفتك ومشاريعك.\n" +
+      "🟢 **خطط تسويق عالية الدخل**: احصل على وصول مباشر لحملات تسويقية سرية تحقق أكثر من 500$ يومياً.\n" +
+      "🟢 **أولوية معالجة الطلبات**: استجابة فورية فائقة السرعة من نماذج الذكاء الاصطناعي المتطورة.\n" +
+      "🟢 **مضاعفة عمولة الإحالة**: احصل على **50% عمولة كاملة** بدلاً من 25% من مدفوعات نجوم تيليجرام لجميع المشتركين من خلالك.\n\n" +
+      `سعر الترقية: **250 نجمة ⭐** (رصيدك الحالي: ${user.starsBalance} نجمة)`;
+    
+    const premium_kb: any = { inline_keyboard: [] };
+    if (user.isPremium) {
+      premium_kb.inline_keyboard.push([{ text: "✅ مفعّل بالفعل (VIP مدى الحياة)", callback_data: "noop" }]);
+    } else if (user.starsBalance >= 250) {
+      premium_kb.inline_keyboard.push([{ text: "💳 إتمام الترقية وحسم 250 نجمة ⭐", callback_data: "act_buy_premium" }]);
+    } else {
+      premium_kb.inline_keyboard.push([{ text: "⚡ شحن رصيد النجوم ومحاكاة الدفع", callback_data: "act_add_stars" }]);
+    }
+    premium_kb.inline_keyboard.push([{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]);
+
+    await this.sendMessage(userId, premium_text, premium_kb);
+  }
+
+  private async triggerStatsFlow(userId: number, user: SimUser) {
+    const userCount = Object.keys(this.users).length;
+    const totalStarsIssued = Object.values(this.users).reduce((acc, curr) => acc + curr.starsBalance, 0);
+    
+    const info_text = 
+      "📊 **إحصائيات حسابك وإحصائيات الشبكة لعام 2026**\n\n" +
+      `👤 رصيدك من النجوم الكلي المتاح للعمل: **${user.starsBalance} نجمة ⭐**\n` +
+      `👤 عدد المستخدمين المسجلين كلياً في نظامنا: **${userCount} مستخدم**\n` +
+      `💎 نسبة المترقين للباقة بريميوم: **${Object.values(this.users).filter(u => u.isPremium).length} مستخدم**\n` +
+      `⭐ إجمالي النجوم المتداولة في السيرفر: **${totalStarsIssued} نجمة**\n` +
+      "⚙️ نوع قاعدة البيانات النشطة: *Hyper-V SQLite3 Memory Ledger*\n\n" +
+      "البوت يعمل بالطاقة القصوى وبالمزامنة الكاملة مع خوادم Google AI.";
+      
+    await this.sendMessage(userId, info_text, {
+      inline_keyboard: [[{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]]
+    });
+  }
+
+  private async triggerLuckySpinFlow(userId: number, user: any) {
+    const lastSpin = user.lastSpinTimestamp ? new Date(user.lastSpinTimestamp).getTime() : 0;
+    const now = Date.now();
+    const cooldown = 24 * 60 * 60 * 1000; // 24 hours
+    
+    let hoursLeft = 0;
+    if (now - lastSpin < cooldown) {
+      hoursLeft = Math.ceil((cooldown - (now - lastSpin)) / (1000 * 60 * 60));
+    }
+
+    let spin_message = 
+      "🎰 **عجلة الحظ اليومية للأرباح والنجوم!** 🎡\n\n" +
+      "أهلاً بك في ميزة كسب النجوم الفورية بالحظ! يمكنك إدارة عجلة الحظ مرة واحدة كل 24 ساعة لربح نجوم أو تفعيل ترقيات مجانية.\n\n" +
+      "🎁 **المكافآت الممكنة بالعجلة:**\n" +
+      "├ ⭐ ربح 10 نجوم برصيدك\n" +
+      "├ ⭐ ربح 50 نجمة هدية فوري\n" +
+      "├ ⭐ ربح 100 نجمة كبرى!\n" +
+      "├ 👑 تجربة العضوية VIP الممتازة مجاناً!\n" +
+      "└ ❌ فرصة حظ أوفر المرة القادمة\n\n";
+
+    if (hoursLeft > 0) {
+      spin_message += `⏳ **لقد قمت بإدارة العجلة مسبقاً!** يرجى الانتظار **${hoursLeft} ساعة** لإعادة المحاولة من جديد.`;
+      await this.sendMessage(userId, spin_message, {
+        inline_keyboard: [[{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]]
+      });
+    } else {
+      spin_message += `🚀 **العجلة جاهزة للدوران الآن!** انقر على الزر بالأسفل لمعرفة ما يخبئه حظك السعيد:`;
+      await this.sendMessage(userId, spin_message, {
+        inline_keyboard: [
+          [{ text: "🎰 أدر العجلة الآن!", callback_data: "act_spin_lucky_wheel" }],
+          [{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]
+        ]
+      });
     }
   }
 
@@ -282,12 +525,22 @@ export class LiveTelegramBotServer {
           { text: "💎 الترقية للـ VIP المميزة", callback_data: "btn_live_premium" },
           { text: "👥 شبكة العمولات والإحالة", callback_data: "btn_live_reflink" }
         ],
-        [{ text: "📊 لوحة المعلومات والإحصائيات", callback_data: "btn_live_info" }]
+        [
+          { text: "🎰 عجلة الحظ اليومية 🎡", callback_data: "btn_live_lucky_wheel" },
+          { text: "📊 لوحة المعلومات والإحصائيات", callback_data: "btn_live_info" }
+        ]
       ]
     };
   }
 
   private async sendWelcomeMessage(chatId: number, fullName: string, user: SimUser, prefix: string = "") {
+    // Re-register custom persistent keyboard on start
+    await this.sendMessage(
+      chatId,
+      "⚙️ **تم تفعيل لوحة الاختصارات والتحكم الفوري بالأسفل للوصول بضغطة زر واحدة!** 👇",
+      this.getReplyKeyboardMarkup()
+    );
+
     const welcomeText = (prefix ? prefix + "\n\n" : "") +
       `👋 أهلاً بك في **بوت الذكاء الاصطناعي العربي لصناعة المحتوى والدخل السلبي لعام 2026**، *${fullName}*!\n\n` +
       `💰 **إحصائيات حسابك وعمولاتك الحالية:**\n` +
@@ -311,14 +564,15 @@ export class LiveTelegramBotServer {
       "1️⃣ **إنتاج خطة تسويقية (🚀 Affiliate Engine)**: أدخل أي نوع منتج أو مجال وسيقوم الذكاء الاصطناعي ببناء خطة تسويقية مفصلة لك لكسب العمولات.\n" +
       "2️⃣ **مختبر الفيديوهات الفيروسية (📸 Viral Lab)**: يكتب لك سيناريوهات فيديو احترافية مع خطافات بصرية وملاحظات تفصيلية لزيادة الانتشار الأورجانيك.\n" +
       "3️⃣ **عضوية بريميوم مدى الحياة (👑 VIP Lifetime)**: تمنحك استعلامات وتوليد غير محدود، وأولوية قصوى في معالجة طلباتك، ومضاعفة عمولتك لجميع الإحالات لتصل إلى 50%.\n" +
-      "4️⃣ **شبكة الإحالة والعمولات (👥 Referrals)**: تتيح لك مشاركة رابط تتبع مخصص لك. تكسب 50 نجمة فورية عن كل عضو يسجل عن طريقك، بالإضافة إلى عمولتك المباشرة من ترقياتهم.";
+      "4️⃣ **شبكة الإحالة والعمولات (👥 Referrals)**: تتيح لك مشاركة رابط تتبع مخصص لك. تكسب 50 نجمة فورية عن كل عضو يسجل عن طريقك، بالإضافة إلى عمولتك المباشرة من ترقياتهم.\n" +
+      "5️⃣ **عجلة الحظ اليومية (🎡 Lucky Spin)**: يمكنك دوران العجلة لتبادل الفرص مجاناً وكسب نجوم وجوائز بريميوم.";
 
     await this.sendMessage(chatId, helpText, {
       inline_keyboard: [[{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]]
     });
   }
 
-  private async handleCallbackQuery(userId: number, data: string, messageId: number, user: SimUser) {
+  private async handleCallbackQuery(userId: number, data: string, messageId: number, user: any) {
     switch (data) {
       case "btn_live_back":
         await this.editMessageText(
@@ -494,6 +748,123 @@ export class LiveTelegramBotServer {
           
         await this.editMessageText(userId, messageId, info_text, {
           inline_keyboard: [[{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]]
+        });
+        break;
+
+      case "act_verify_sponsor":
+        const isSubscribed = await this.checkSponsorSubscription(userId);
+        if (isSubscribed) {
+          await this.sendMessage(
+            userId,
+            "🎉 **رائع جداً! تم التحقق من اشتراكك بنجاح.**\n\n" +
+            "تم تفعيل خط الكسب السريع ونموذج الذكاء الاصطناعي لحسابك بنجاح! استعد لبدء الربح الفوري. 🚀"
+          );
+          await this.sendWelcomeMessage(userId, user.fullName, user);
+        } else {
+          await this.sendMessage(
+            userId,
+            `⚠️ **لم نتمكن من كشف اشتراكك بالقناة بعد!**\n\nيرجى فتح رابط القناة بالأسفل والضغط على زر (انضمام / Join) لتوصيل الخدمة، ومن ثَم المحاولة مجدداً.`,
+            {
+              inline_keyboard: [
+                [{ text: "📢 انضم لقناة الراعي الرسمي", url: "https://t.me/MoneydroidArabic" }],
+                [{ text: "🔄 إعادة التحقق الفوري والبدء", callback_data: "act_verify_sponsor" }]
+              ]
+            }
+          );
+        }
+        break;
+
+      case "btn_live_lucky_wheel":
+        const lastSpin = user.lastSpinTimestamp ? new Date(user.lastSpinTimestamp).getTime() : 0;
+        const now = Date.now();
+        const cooldown = 24 * 60 * 60 * 1000; // 24 hours
+        
+        let hoursLeft = 0;
+        if (now - lastSpin < cooldown) {
+          hoursLeft = Math.ceil((cooldown - (now - lastSpin)) / (1000 * 60 * 60));
+        }
+
+        let spin_message = 
+          "🎰 **عجلة الحظ اليومية للأرباح والنجوم!** 🎡\n\n" +
+          "أهلاً بك في ميزة كسب النجوم الفورية بالحظ! يمكنك إدارة عجلة الحظ مرة واحدة كل 24 ساعة لربح نجوم أو تفعيل ترقيات مجانية.\n\n" +
+          "🎁 **المكافآت الممكنة بالعجلة:**\n" +
+          "├ ⭐ ربح 10 نجوم برصيدك\n" +
+          "├ ⭐ ربح 50 نجمة هدية فوري\n" +
+          "├ ⭐ ربح 100 نجمة كبرى!\n" +
+          "├ 👑 تجربة العضوية VIP الممتازة مجاناً!\n" +
+          "└ ❌ فرصة حظ أوفر المرة القادمة\n\n";
+
+        if (hoursLeft > 0) {
+          spin_message += `⏳ **لقد قمت بإدارة العجلة مسبقاً!** يرجى الانتظار **${hoursLeft} ساعة** لإعادة المحاولة من جديد.`;
+          await this.editMessageText(userId, messageId, spin_message, {
+            inline_keyboard: [[{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]]
+          });
+        } else {
+          spin_message += `🚀 **العجلة جاهزة للدوران الآن!** انقر على الزر بالأسفل لمعرفة ما يخبئه حظك السعيد:`;
+          await this.editMessageText(userId, messageId, spin_message, {
+            inline_keyboard: [
+              [{ text: "🎰 أدر العجلة الآن!", callback_data: "act_spin_lucky_wheel" }],
+              [{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]
+            ]
+          });
+        }
+        break;
+
+      case "act_spin_lucky_wheel":
+        const lastSpinTime = user.lastSpinTimestamp ? new Date(user.lastSpinTimestamp).getTime() : 0;
+        const currentTime = Date.now();
+        const spinCooldown = 24 * 60 * 60 * 1000;
+        
+        if (currentTime - lastSpinTime < spinCooldown) {
+          const hoursLeft = Math.ceil((spinCooldown - (currentTime - lastSpinTime)) / (1000 * 60 * 60));
+          await this.editMessageText(
+            userId,
+            messageId,
+            `⏳ **المحاولة غير متاحة حالياً!**\n\nيرجى الانتظار لمدة ${hoursLeft} ساعة إضافية متبقية قبل تفعيل الدورة القادمة.`,
+            { inline_keyboard: [[{ text: "🔙 العودة للرئيسية", callback_data: "btn_live_back" }]] }
+          );
+          return;
+        }
+
+        user.lastSpinTimestamp = new Date().toISOString();
+        const spinOptions = [
+          { name: "⭐ 10 نجوم مجانية", value: 10, type: "stars" },
+          { name: "⭐ 50 نجمة مجانية", value: 50, type: "stars" },
+          { name: "⭐ جائرة الـ 100 نجمة الكبرى! 🔥", value: 100, type: "stars" },
+          { name: "👑 تفعيل فوري للباقة الممتازة VIP (تجريبية)!", value: 0, type: "premium" },
+          { name: "❌ حظ أوفر في الدوران القادم!", value: 0, type: "fail" }
+        ];
+
+        const randomVal = Math.random();
+        let chosen;
+        if (randomVal < 0.40) {
+          chosen = spinOptions[0]; // 10 stars (40%)
+        } else if (randomVal < 0.65) {
+          chosen = spinOptions[1]; // 50 stars (25%)
+        } else if (randomVal < 0.75) {
+          chosen = spinOptions[2]; // 100 stars (10%)
+        } else if (randomVal < 0.85) {
+          chosen = spinOptions[3]; // VIP premium (10%)
+        } else {
+          chosen = spinOptions[4]; // Fail (15%)
+        }
+
+        let outcomeDesc = "";
+        if (chosen.type === "stars") {
+          user.starsBalance += chosen.value;
+          outcomeDesc = `🎉 **مبروك! العجلة توقفت على: [${chosen.name}]**\n\nتمت إضافة **+${chosen.value} نجمة ⭐** تلقائياً إلى رصيدك الإجمالي ليصبح رصيدك الحالي **${user.starsBalance} نجمة**!`;
+          this.addLog("success", `🎰 مستخدم @${user.username} أدار عجلة الحظ وربح +${chosen.value} نجمة.`);
+        } else if (chosen.type === "premium") {
+          user.isPremium = true;
+          outcomeDesc = `👑 **مبروك استثنائية! العجلة توقفت على: [${chosen.name}]**\n\nتمت ترقية باقة حسابك إلى الباقة الفائقة VIP مجاناً! استمتع بكافة أدوات التوليد اللانهائي وأولوية المعالجة.`;
+          this.addLog("success", `🎰 مستخدم @${user.username} ربح عضوية بريميوم مجاناً عبر عجلة الحظ.`);
+        } else {
+          outcomeDesc = `😔 **العجلة توقفت على: [${chosen.name}]**\n\nلا بأس، لقد حصلت على فرصة تجربة جيدة. شارك البوت مع أصدقائك للحصول على مكافآت إحالة بـ +50 نجمة فورية عن كل جهة اتصال!`;
+          this.addLog("info", `🎰 مستخدم @${user.username} لم يربح في عجلة الحظ هذه المرة.`);
+        }
+
+        await this.editMessageText(userId, messageId, `🎡 **نتائج دوران عجلة الحظ اليومية:**\n\n` + outcomeDesc, {
+          inline_keyboard: [[{ text: "🔙 عودة للوحة التحكم", callback_data: "btn_live_back" }]]
         });
         break;
     }
